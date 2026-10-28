@@ -28,7 +28,11 @@ Docker Image Puller 是一个方便的工具，用于从 Docker 仓库拉取镜�
 - 🔍 **全网可视搜索与表格展示**：输入关键词，实时呈现包含**镜像名称、Star 数、拉取量、更新日期**等详细信息的直观表格。
 - 🖱️ **智能联动选择**：在左侧表格中点击任意镜像，右侧会自动拉取所有可用 Tag 列表。Tag 与架构（amd64/arm64等）均可通过下拉框轻松点选。
 - 🌐 **多源切换 & 图形化代理配置**：
-  - 内置支持防墙数据源（如 1ms 专属加速源、国内南大镜像源、Docker官方源）一键切换。
+  - 内置 **华为云 DDN 加速（docker.io 国内中转）**、1ms 专属加速源、DaoCloud、轩辕、Docker 官方源一键切换；所选源不可用时会**自动回退**到下一个源。
+  - **镜像源可配置**：在「⚙️ 全局设置项 → 🧩 镜像源配置」中直接增删改源，每行格式 `名称|registry 主机名|仓库路径前缀(可选)`，顺序即优先级；可「保存到配置文件」持久化到 `conf/sources.conf`。
+  - 支持直接粘贴**完整镜像地址**，例如 `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nginx:1.31.8`，自动识别 registry 与仓库路径。
+  - Tag 列表直接来自 registry 的 `tags/list` 实时接口，并按版本倒序排列（最新版本置顶），刚发布的版本（如 `nginx:1.31.8`）也能立刻选到，不再受搜索索引滞后影响。
+  - 搜索框支持 `nginx:1.31.8`、`docker.io/nginx:1.31.8` 等写法，`docker.io/` 等前缀会被自动归一化。
   - 提供单选按钮轻松切换网络模式（无代理、系统代理、自定义账号密码代理），并支持一键开关 SSL 验证。
 - 📊 **精美实时进度面板**：消除传统命令行的刷屏闪烁，提供定制化的 HTML 动态多排条形进度UI，实时展示：当前分块状态、总进度百分比、各分层下载量，以及**预估实时下载速度**。
 - 📁 **内置本地镜像大管家**：提供独立的本地 `.tar` 文件管理面板。在前端不仅可以看到所有已下载的包，还支持**直接在浏览器里点击下载到当前设备**，以及提供下拉框一键删除不需要的包以释放空间。
@@ -51,6 +55,136 @@ python app.py
 1. **第一步（查）**：输入 `nginx` 等关键词，点击搜索，表格出结果后点击你想要的那一行。
 2. **第二步（选）**：右侧确认 Tag（版本）和 Arch（架构），点击“开始下载”。
 3. **第三步（管）**：下方进度条跑满后，自动在本地镜像列表中刷出 `.tar` 文件，可以直接下载到本机转移或一键删除。
+
+## 🐳 Docker 化部署（同时支持 amd64 / arm64）
+
+### 1. 单架构快速构建
+
+```bash
+docker build -t dockerpulltar/app:local .
+docker run -d --name docker-pull-tar -p 7860:7860 \
+  -v "$(pwd)/downloads:/app/downloads" \
+  -v "$(pwd)/conf:/app/conf" \
+  dockerpulltar/app:local
+```
+
+访问 http://127.0.0.1:7860 即可。
+
+### 2. docker compose 一键启动
+
+```bash
+docker compose up -d          # 后台启动
+docker compose logs -f        # 查看日志
+docker compose down           # 停止
+```
+
+### 3. 多架构镜像（linux/amd64 + linux/arm64）
+
+一个镜像同时适配两种主机，**由 buildx 构建多架构清单（manifest list）**：
+
+```bash
+# Linux / macOS
+./build-multiarch.sh myrepo/docker-pull-tar:latest --push
+
+# Windows PowerShell
+.\build-multiarch.ps1 -Image myrepo/docker-pull-tar:latest -Push
+```
+
+手动等价命令：
+
+```bash
+docker buildx create --name dockerpulltar-builder --driver docker-container --use
+docker buildx inspect --bootstrap
+docker buildx build --platform linux/amd64,linux/arm64 \
+    -t myrepo/docker-pull-tar:latest --push .
+```
+
+验证多架构清单：
+
+```bash
+docker buildx imagetools inspect myrepo/docker-pull-tar:latest
+```
+
+拉取时由 Docker 自动按宿主机架构选择对应镜像：
+
+```bash
+docker pull myrepo/docker-pull-tar:latest
+```
+
+> 无镜像仓库时可用 `-OciOutput`（PowerShell）/ `--oci`（Shell）导出本地多架构 OCI 归档
+> `docker-pull-tar-multiarch.oci.tar`。
+>
+> 在 amd64 机器上跑 arm64 镜像需安装 QEMU 模拟层：
+> `docker run --privileged --rm tonistiigi/binfmt --install arm64`
+>
+> 权限提示：镜像内以非 root（uid 10001）运行，若宿主机 `./downloads` 目录不可写，
+> 会导致下载保存失败。执行 `chmod 777 downloads`，或在 compose 中取消 `user:` 注释
+> 以宿主机用户身份运行。
+
+### 4. 容器内可用环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `GRADIO_SERVER_NAME` | `0.0.0.0` | 监听地址，容器内必须为 `0.0.0.0` |
+| `GRADIO_SERVER_PORT` | `7860` | 服务端口 |
+| `GRADIO_INBROWSER` | `0`（容器） | 是否自动打开浏览器 |
+| `GRADIO_SHARE` | `0` | 是否生成公网临时链接 |
+| `SOURCES_CONFIG` | `conf/sources.conf` | 镜像源配置文件路径（容器内 `/app/conf/sources.conf`） |
+| `PIP_INDEX_URL` | 清华镜像 | 构建参数，指定 pip 源 |
+
+### 5. 一次导出多个架构
+
+界面中的「选择架构 Arch」为**多选**，勾选 `amd64` + `arm64` 后点一次下载，会依次生成两个独立包：
+
+```
+downloads/library_nginx_1.31.6_amd64.tar
+downloads/library_nginx_1.31.6_arm64.tar
+```
+
+在目标机上分别导入：
+
+```bash
+docker load -i library_nginx_1.31.6_amd64.tar
+docker load -i library_nginx_1.31.6_arm64.tar
+```
+
+### 6. WSL Container Desktop（`wslc.exe`，Windows 11 + WSL 2.9.3+ 自带）
+
+无需安装 Docker Desktop，WSL 自带容器 CLI：
+
+```powershell
+# 构建（基础镜像默认走华为云 DDN 加速源）
+wslc build -t dockerpulltar/app:local .
+
+# 运行：容器内 7860 映射到宿主 7860
+# 把 <你的项目目录> 换成自己的本地路径，例如 D:\code\docker-pull-tar
+wslc run -d --name docker-pull-tar -p 7860:7860 `
+  -v "<你的项目目录>\downloads:/app/downloads" `
+  -v "<你的项目目录>\conf:/app/conf" `
+  dockerpulltar/app:local
+
+# 查看
+wslc container ps
+wslc logs docker-pull-tar
+wslc image ls
+```
+
+镜像源配置：
+- 界面编辑：首页「⚙️ 全局设置项 → 🧩 镜像源配置」，每行 `名称|registry 主机名|仓库路径前缀(可选)`，顺序即优先级。
+- 持久化：点「💾 保存到配置文件」写入 `conf/sources.conf`（容器内 `/app/conf/sources.conf`）。
+- 挂载 `conf` 目录后，在宿主机直接改 `conf/sources.conf` 并重启容器即可换源；也可用环境变量 `SOURCES_CONFIG` 指定其它路径。
+
+注意事项：
+
+- **端口**：容器内固定监听 7860（`GRADIO_SERVER_PORT`），映射 `-p 7860:7860` 后浏览器访问 `http://127.0.0.1:7860` 即可。
+- **卷挂载必须写 Windows 路径**（如 `D:\data\downloads`）。容器命名空间内没有 `/mnt/f`，写 `/mnt/f/...` 会挂出一个空目录（不报错，容易误判成功）。
+- **只能挂目录，不能挂单个文件**：`-v "D:\conf\sources.conf:/app/conf/sources.conf"` 会直接让 wslc 引擎崩溃（报 `ERROR_UNHANDLED_EXCEPTION`，容器起不来）。要挂配置文件请挂它所在的目录。
+- `wslc` **没有 `--platform` 参数**，只能构建宿主架构（amd64）的镜像；arm64 镜像需在 arm64 机器上构建。
+- 构建上下文里的 `# syntax=docker/dockerfile:1` 会触发拉取 `docker/dockerfile:1` 前端镜像，Docker Hub 不可达时会直接失败，本项目 Dockerfile 已不声明该行。
+- 基础镜像默认走华为云 DDN（docker.io 国内中转）：
+  `ARG BASE_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.13-slim-bookworm`，
+  需要 1ms 源或官方源时用 `--build-arg BASE_IMAGE=docker.1ms.run/library/python:3.13-slim-bookworm`
+  （或 `--build-arg BASE_IMAGE=python:3.13-slim-bookworm`）覆盖。
 
 ## Web服务截图
 
@@ -167,7 +301,7 @@ DockerPull.exe [选项]
 #### 交互式模式
 
 ```bash
-D:\> DockerPull.exe
+> DockerPull.exe
 
 🚀 Docker 镜像拉取工具 v1.4.0
 请输入 Docker 镜像名称（例如：nginx:latest 或 harbor.abc.com/abc/nginx:1.26.0）：alpine
@@ -180,7 +314,7 @@ D:\> DockerPull.exe
 📦 镜像：library/alpine
 📦 标签：latest
 📦 架构：arm64
-📁 输出目录：D:\library_alpine_latest_arm64
+📁 输出目录：library_alpine_latest_arm64
 📥 开始下载...
 ✅ 镜像已保存为: library_alpine_latest_arm64.tar
 💡 导入命令: docker load -i library_alpine_latest_arm64.tar
@@ -309,6 +443,12 @@ DockerPull.exe -i nginx:latest -o ./downloads
 
 **Q**: 如何指定下载目录？  
 **A**: 使用 `-o` 参数指定，例如 `DockerPull.exe -i nginx:latest -o ./downloads`。
+
+**Q**: 提示“镜像或标签不存在 / 404”怎么办？  
+**A**: 三种常见原因：① 输入带了 `docker.io/` 前缀 —— 现在已自动归一化为 `library/nginx`；② Tag 下拉框数据陈旧 —— 现在改为直连 registry 的 `tags/list` 实时接口并按版本倒序，新版本立即可见；③ 所选镜像源缓存滞后 —— Web 版会自动回退到下一个源（华为云 DDN → 1ms → DaoCloud → 轩辕 → 官方），也可在下拉框手动切换源。
+
+**Q**: Docker Hub 官方源太慢/超时，用哪个源？  
+**A**: 默认首选就是**华为云 DDN 加速**（`swr.cn-north-4.myhuaweicloud.com`，docker.io 的国内中转），例如 `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nginx:1.31.8`。注意该代理源按架构拆分 tag：arm64 变体形如 `1.31.8-linuxarm64`，且同步较慢；工具会自动尝试变体，代理源缺该架构时自动回退到 1ms 等多架构源。
 
 ---
 

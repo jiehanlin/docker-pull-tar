@@ -65,6 +65,46 @@ DOWNLOAD_MAX_RETRIES = 5
 BACKOFF_BASE = 0.5
 MAX_PARALLEL_LAYERS = 8
 
+# Docker Hub 的等价域名，剥离后按官方镜像处理
+DOCKER_HUB_PREFIXES = ("docker.io/", "index.docker.io/", "registry-1.docker.io/", "registry.hub.docker.com/")
+
+
+def normalize_repository(repo: str) -> str:
+    """把用户输入的镜像名转换为 registry 使用的 repository 路径。
+
+    docker.io/nginx -> library/nginx
+    nginx           -> library/nginx
+    harbor.x.com/ns/img -> 原样保留（私有仓库）
+    """
+    name = (repo or "").strip().strip("/")
+    if not name:
+        return ""
+    lowered = name.lower()
+    for prefix in DOCKER_HUB_PREFIXES:
+        if lowered.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    name = name.strip("/")
+    if not name:
+        return ""
+    if "/" not in name:
+        return f"library/{name}"
+    return name
+
+
+def parse_image_ref(text: str) -> Tuple[str, str]:
+    """解析镜像引用，返回 (repository, tag)；未带 tag 时 tag 为空字符串。
+
+    支持 nginx / nginx:1.31.8 / docker.io/nginx:1.31.8 / ns/repo:tag / harbor:5000/ns/repo:tag
+    """
+    value = (text or "").strip()
+    if not value:
+        return "", ""
+    head, sep, tail = value.rpartition(":")
+    if sep and head and "/" not in tail:
+        return normalize_repository(head), tail
+    return normalize_repository(value), ""
+
 
 def signal_handler(signum, frame):
     global stop_event
@@ -346,6 +386,27 @@ def get_auth_head(
     raise RuntimeError("获取认证头失败")
 
 
+def get_tags_registry(session: requests.Session, registry: str, repository: str) -> List[str]:
+    """标准 registry 的实时 tag 列表。
+
+    1ms 的搜索索引更新较慢（镜像已发布的新 tag 可能还没进索引），
+    直接问 registry 的 tags/list 可以立刻拿到最新 tag。
+    """
+    headers: Dict[str, str] = {}
+    try:
+        ping_url = f"https://{registry}/v2/"
+        resp = session.get(ping_url, verify=False, timeout=30)
+        if resp.status_code == 401 and "WWW-Authenticate" in resp.headers:
+            www = resp.headers["WWW-Authenticate"]
+            headers = get_auth_head(session, www.split('"')[1], www.split('"')[3], repository)
+    except Exception as e:
+        logger.warning(f"registry 认证探测失败，将尝试匿名请求 tags/list: {e}")
+
+    resp = session.get(f"https://{registry}/v2/{repository}/tags/list", headers=headers, verify=False, timeout=60)
+    resp.raise_for_status()
+    return [t for t in (resp.json().get("tags") or []) if t]
+
+
 def fetch_manifest(
     session: requests.Session,
     registry: str,
@@ -360,6 +421,8 @@ def fetch_manifest(
             resp = session.get(url, headers=auth_head, verify=False, timeout=60)
             if resp.status_code == 401:
                 return resp, 401
+            if resp.status_code == 404:
+                return resp, 404
             resp.raise_for_status()
             return resp, 200
         except requests.exceptions.RequestException as e:
@@ -1033,6 +1096,7 @@ def interactive_tag_select(
     repositories: str,
     page_size: int = 8,
     default_tag: str = "latest",
+    registry: str = DEFAULT_1MS_REGISTRY,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     返回：(tag_name, tag_item)
@@ -1088,6 +1152,7 @@ def interactive_tag_select(
 
         print("-" * 80)
         print("输入：序号=选择  n=下一页  p=上一页  g=跳页  s=搜索tag  q=退出")
+        print("（也可以直接输入 tag 名，例如 1.31.8 —— 1ms 索引未收录的新版本用它）")
         cmd = input("你的选择: ").strip().lower()
 
         if cmd in ("q", "quit", "exit"):
@@ -1118,6 +1183,19 @@ def interactive_tag_select(
             search = input("输入 tag 搜索关键词（留空清空搜索）: ").strip()
             page = 1
             continue
+
+        # 直接输入 tag 名（例如 1.31.8）：1ms 索引可能还没收录刚发布的版本
+        if cmd and not cmd.isdigit():
+            try:
+                live_tags = get_tags_registry(session, registry, repositories)
+            except Exception as e:
+                logger.warning(f"获取实时 tag 列表失败，将直接使用输入的 tag: {e}")
+                live_tags = []
+            if live_tags and cmd not in live_tags:
+                print(f"⚠  registry 中未找到 tag：{cmd}")
+                continue
+            print(f"✅ 使用手动输入的 tag：{cmd}")
+            return cmd, {}
 
         try:
             selected = int(cmd)
@@ -1297,7 +1375,15 @@ def main():
                 return
 
         selected_item: Dict[str, Any]
-        if args.select_index:
+        direct_repo, direct_tag = parse_image_ref(args.keyword)
+        if direct_tag and not args.select_index:
+            # 直接指定了 镜像:tag（如 nginx:1.31.8 / docker.io/nginx:1.31.8），跳过搜索
+            namespace, _, name = direct_repo.rpartition("/")
+            selected_item = {"namespace": namespace or "library", "name": name}
+            if not args.tag:
+                args.tag = direct_tag
+            logger.info(f"直接定位镜像：{direct_repo}:{direct_tag}")
+        elif args.select_index:
             data = search_1ms(session, args.api, args.keyword, args.page, args.page_size)
             items = data.get("list", [])
             if not items:
@@ -1348,6 +1434,7 @@ def main():
                 repositories=repositories,
                 page_size=8,
                 default_tag="latest",
+                registry=args.registry,
             )
         args.tag = chosen_tag
         print(f"\n✅ 已选择 tag：{args.tag}")
@@ -1380,6 +1467,10 @@ def main():
         resp, code = fetch_manifest(session, image_info.registry, image_info.repository, image_info.tag, auth_head)
         if code == 401:
             logger.error("registry 需要认证，但未提供登录方式（当前专版默认拉取公开镜像）")
+            return
+        if code == 404:
+            logger.error(f"镜像或标签不存在：{image_info.repository}:{image_info.tag}（源 {image_info.registry}）")
+            logger.error("可换一个镜像源重试：--registry docker.m.daocloud.io")
             return
         resp_json = resp.json()
 

@@ -1,0 +1,28 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# 本地下载产物与镜像包
+downloads/
+*.tar
+*.tar.gz
+*.log
+
+# 构建/打包相关
+build/
+dist/
+*.spec
+.idea/
+.vscode/
+.git/
+.gitignore
+
+# 文档与素材（运行不需要）
+*.md
+screenshots/
+LICENSE
+requirements.txt.bak

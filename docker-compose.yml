@@ -1,0 +1,28 @@
+services:
+  docker-pull-tar:
+    build:
+      context: .
+      args:
+        # 国内 pip 镜像；可用环境变量 PIP_INDEX_URL 覆盖
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    image: ${IMAGE:-dockerpulltar/app:local}
+    container_name: docker-pull-tar
+    # 容器内监听 7860，映射到宿主机
+    ports:
+      - "${PORT:-7860}:7860"
+    # 镜像 tar 包落盘目录（宿主机可直接看到 .tar 文件）
+    volumes:
+      - ./downloads:/app/downloads
+      # 镜像源配置目录（界面里保存的源配置持久化到这里，宿主机可直接编辑）
+      - ./conf:/app/conf
+    environment:
+      GRADIO_SERVER_NAME: "0.0.0.0"
+      GRADIO_SERVER_PORT: "7860"
+      GRADIO_INBROWSER: "0"
+      GRADIO_ANALYTICS_ENABLED: "False"
+      SOURCES_CONFIG: "/app/conf/sources.conf"
+      TZ: "Asia/Shanghai"
+    # 镜像内默认以非 root(uid 10001) 运行；若宿主机 downloads 目录权限不足，
+    # 二选一：chmod 777 downloads   或   取消下面一行的注释以宿主机用户身份运行
+    # user: "${UID:-1000}:${GID:-1000}"
+    restart: unless-stopped
